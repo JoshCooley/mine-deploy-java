@@ -81,6 +81,7 @@ resource "aws_instance" "minecraft" {
   tags = {
     Name = "minecraft"
   }
+  user_data              = file("setup_spigot.sh")
   vpc_security_group_ids = [data.aws_security_group.ssh.id]
 }
 

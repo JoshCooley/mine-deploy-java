@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
 set -e
 
-usage="Usage: $0 [FUNCTION_NAME]"
+usage="Usage: $0 [FUNCTION_NAME]
+
+Available functions:
+  accept_eula
+  add_spigot_user
+  build_spigot
+  check_for_root
+  download_buildtools
+  download_essentials
+  install_dependencies
+  install_service
+"
 buildtools_jar_url=https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar
 spigot_directory=/opt/spigot
 spigot_user=spigot
 s3_bucket=minecraft.cooley.tech
-monit_version=5.26.0
-monit_url=https://mmonit.com/monit/dist/binary/$monit_version/monit-$monit_version-linux-x64.tar.gz
-main_monit_config='set log /var/log/monit.log
+spigot_service="[Unit]
+Description=spigot
 
-set httpd unixsocket /var/run/monit.sock
-  allow localhost
+[Service]
+ExecStart=/usr/bin/java -jar spigot.jar --noconsole --nogui
+ExecStop=/usr/local/bin/mcrcon -p rcon stop
+User=$spigot_user
+Group=$spigot_user
+WorkingDirectory=$spigot_directory
+Restart=always
+TimeoutStartSec=90
+RestartSec=30
 
-include /usr/local/etc/monit.d/*
-'
-spigot_monit_config='check process minecraft
-  matching "^java -jar spigot.*jar$"
-  start program = "/usr/bin/java -Duser.dir='"'$spigot_directory'"' -jar /opt/spigot/spigot.jar" as uid "'$spigot_user'" and gid "'$spigot_user'"
-  stop program = "/usr/local/bin/mcrcon -p rcon stop"
-  if failed port 25565 with timeout 30 seconds then restart
-  if failed port 8123  with timeout 120 seconds then restart
-'
-mcrcon_url=$(curl -s https://api.github.com/repos/Tiiffi/mcrcon/releases/latest \
-  | jq .assets[].browser_download_url -r \
-  | grep linux-x86-64
-)
+[Install]
+WantedBy=multi-user.target
+"
 
 check_for_root(){
   echo 'Checking for root ...'
@@ -37,7 +44,11 @@ check_for_root(){
 
 install_dependencies(){
   echo 'Installing dependencies ...'
-  yum install -y git java-1.8.0-openjdk-devel wget
+  yum install -y git java-1.8.0-openjdk-devel jq wget 
+  mcrcon_url=$(curl -s https://api.github.com/repos/Tiiffi/mcrcon/releases/latest \
+    | jq .assets[].browser_download_url -r \
+    | grep linux-x86-64
+  )
   wget "$mcrcon_url" --directory-prefix=/tmp
   tar --directory=/tmp/ \
     --strip-components 1 \
@@ -45,7 +56,7 @@ install_dependencies(){
   mv /tmp/mcrcon /usr/local/bin/
 }
 
-add_spigot_user_and_change_ownership(){
+add_spigot_user(){
   useradd --system \
     --home-dir "$spigot_directory" \
     "$spigot_user"
@@ -62,34 +73,29 @@ build_spigot(){
   echo 'Building Spigot ...'
   java -jar "$spigot_directory"/BuildTools.jar --output-dir "$spigot_directory"
   spigot_jar=$(tail -1 BuildTools.log.txt | cut -d ' ' -f 6)
-  ln -s "$spigot_jar" "$spigot_directory"/spigot.jar
+  ln --symbolic --force "$spigot_jar" "$spigot_directory"/spigot.jar
 }
 
-download_plugins()(
-  echo 'Downloading plugins ...'
-  mkdir "$spigot_directory"/plugins
-  aws s3 cp --recursive "s3://$s3_bucket/plugins" "$spigot_directory"/plugins
+download_essentials()(
+  echo 'Downloading plugins and scripts ...'
+  aws s3 cp --recursive "s3://$s3_bucket" "$spigot_directory"
+  chmod +x "$spigot_directory"/*.sh
+  chown -R "$spigot_user:$spigot_user" "$spigot_directory"
 )
 
 accept_eula(){
   echo 'Accepting EULA ...'
   echo eula=true > "$spigot_directory"/eula.txt
+  chown "$spigot_user:$spigot_user" "$spigot_directory"/eula.txt
 }
 
-install_monit()(
-  echo 'Downloading Monit ...'
-  mkdir /tmp/monit
-  wget --directory-prefix=/tmp/monit "$monit_url"
-  tar --directory=/tmp/monit \
-    -xzvf /tmp/monit/monit-$monit_version-linux-x64.tar.gz
-  echo 'Installing Monit ...'
-  cp "/tmp/monit/monit-$monit_version/bin/monit" /usr/local/bin/
-  gzip --stdout "/tmp/monit/monit-$monit_version/man/man1/monit.1" \
-    > /usr/local/share/man/man1/monit.1.gz
-  mkdir /usr/local/etc/monit.d
-  echo "$main_monit_config" > /usr/local/etc/monitrc
-  chmod 600 /usr/local/etc/monitrc
-  echo "$spigot_monit_config" > /usr/local/etc/monit.d/spigot
+install_service()(
+  echo 'Creating service file ...'
+  echo "$spigot_service" > /etc/systemd/system/spigot.service
+  echo 'Enabling service ...'
+  systemctl enable spigot
+  echo 'Starting service ...'
+  systemctl start spigot
 )
 
 main(){
@@ -97,22 +103,21 @@ main(){
   install_dependencies
   download_buildtools
   build_spigot
-  download_plugins
+  add_spigot_user
+  download_essentials
   accept_eula
-  add_spigot_user_and_change_ownership
-  install_monit
+  install_service
 }
 
 case $1 in
   accept_eula) "$1" ;;
   add_spigot_user) "$1" ;;
-  add_spigot_user_and_change_ownership) "$1" ;;
   build_spigot) "$1" ;;
   check_for_root) "$1" ;;
   download_buildtools) "$1" ;;
-  download_plugins) "$1" ;;
+  download_essentials) "$1" ;;
   install_dependencies) "$1" ;;
-  install_monit) "$1" ;;
+  install_service) "$1" ;;
   '' | main) main ;;
   -h | --help | usage | *) echo "$usage" ;; 
 esac
